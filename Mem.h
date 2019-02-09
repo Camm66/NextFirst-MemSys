@@ -37,7 +37,7 @@ private:
 	Used* allocateFreeBlock(Free* pFree) const;
 
 	Free* mergeBlocks(Free* pHead, Free* pNew) const;
-	Free* dontMergeFreeBlock(Free* pFree, Free* pHead);
+	Free* dontMergeFreeBlock(Free* pFree);
 
 	void addUsedToFront(Used* pUsed) const;
 
