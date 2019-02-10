@@ -65,14 +65,21 @@ void *Mem::malloc(const uint32_t size)
 		if (pFree->mBlockSize == size) {
 			// On exact hit
 			this->removeFreeBlock(pFree); // Remove from free list
-			pUsed = allocateFreeBlock(pFree);
+			// Update Next Fit pointer
+			if (this->pHeap->pNextFit->pFreeNext != nullptr) {
+				this->pHeap->pNextFit = this->pHeap->pNextFit->pFreeNext;
+			}
+			else {
+				this->pHeap->pNextFit = this->pHeap->pFreeHead;
+			}
+			pUsed = allocateFreeBlock(pFree); // Allocate block
 		}
 		else {
 			// On split
 			Free *pSplit = this->splitFreeBlock(pFree, size); // Split current free block
-			pUsed = allocateFreeBlock(pSplit);
+			pUsed = allocateFreeBlock(pSplit); // Allocate split block
+			// On a split, we update the next fit pointer inside the splitFree block function
 		}
-
 		// Get the Start of Used Block (after Used Header)
 		pUsedBlock = this->getBlockPtr(pUsed);
 		assert(pUsedBlock != nullptr);
@@ -90,16 +97,31 @@ Free* Mem::findFreeBlock(const uint32_t size) const
 // a pointer to that block, otherwise it returns a nullptr.
 {
 	Free *pFreeTmp = this->pHeap->pNextFit;
-	Free *pFreeFound = nullptr;
-
-	while (pFreeTmp != nullptr) {
-		if (pFreeTmp->mBlockSize >= size) {
-			pFreeFound = pFreeTmp;
-			break;
+	// First check if the initial next fit is valid 
+	if (pFreeTmp == nullptr || pFreeTmp->mBlockSize < size) {
+		// Check if we need to reset to the pFreeHead
+		if(pFreeTmp->pFreeNext == nullptr)
+		{
+			pFreeTmp = this->pHeap->pFreeHead;
 		}
-		pFreeTmp = pFreeTmp->pFreeNext;
+		else 
+		{
+			pFreeTmp = pFreeTmp->pFreeNext;
+		}
+		// Iterate through the remaining Free list
+		while (pFreeTmp != this->pHeap->pNextFit) {
+			if (pFreeTmp->mBlockSize >= size) {
+				break;
+			}
+			if (pFreeTmp->pFreeNext == nullptr) {
+				pFreeTmp = this->pHeap->pFreeHead;
+			}
+			else {
+				pFreeTmp = pFreeTmp->pFreeNext;
+			}
+		}
 	}
-	return pFreeFound;
+	return pFreeTmp;
 }
 
 Free* Mem::splitFreeBlock(Free *pFree, uint32_t blockSize)
@@ -114,8 +136,7 @@ Free* Mem::splitFreeBlock(Free *pFree, uint32_t blockSize)
 	Free* tmpPrev = pFree->pFreePrev;
 
 	// Get block sizes for each new block and allocate
-	uint32_t headerSize = this->getFreeHeaderSize(pFree);
-	uint32_t newBlock = blockSize + headerSize; // Size of the new block
+	uint32_t newBlock = blockSize + this->getFreeHeaderSize(pFree); // Size of the new block
 	uint32_t diff = pFree->mBlockSize - newBlock; // Offset for the rest
 	Free *pFreeTmp = (Free*)((char*)pFree + newBlock);
 	Free *p1 = placement_new(pFree, Free, blockSize); // New block
@@ -135,14 +156,18 @@ Free* Mem::splitFreeBlock(Free *pFree, uint32_t blockSize)
 	if (this->pHeap->pFreeHead == p1) {
 		this->pHeap->pFreeHead = p2;
 	}
+
+	// Update Next Fit pointer
+	if (this->pHeap->pNextFit == p1) {
+		this->pHeap->pNextFit = p2;
+	}
+
 	// Add secret pointer to split free block
 	this->addSecretPtr(p2);
 
 	// Update stats for extra free block
-	this->pHeap->mStats.currFreeMem -= headerSize; // Account for extra free header
+	this->pHeap->mStats.currFreeMem -= this->getFreeHeaderSize(pFree);; // Account for extra free header
 	this->pHeap->mStats.currNumFreeBlocks += 1; // Account for extra free block
-
-
 
 	return p1;
 }
@@ -170,14 +195,6 @@ void Mem::removeFreeBlock(const Free *pFree) const
 Used* Mem::allocateFreeBlock(Free* pFree) const {
 	// Update requisite stats for free block removal 
 	this->removeFreeAdjustStats(pFree);
-
-	// adjust the nextFit pointer
-	if (this->pHeap->pFreeHead != nullptr && this->pHeap->pFreeHead->pFreeNext != nullptr && this->pHeap->pFreeHead->pFreeNext->mBlockSize > this->pHeap->pFreeHead->mBlockSize) {
-		this->pHeap->pNextFit = this->pHeap->pFreeHead->pFreeNext;
-	}
-	else {
-		this->pHeap->pNextFit = this->pHeap->pFreeHead;
-	}
 
 	// Convert free block to used block
 	Used *pUsed = placement_new(pFree, Used, pFree->mBlockSize);
@@ -220,7 +237,6 @@ void Mem::addUsedAdjustStats(const Used* pUsed) const
 // This method updates the relevant stats for a newly converted Used block
 {
 	assert(pUsed != nullptr);
-
 	this->pHeap->mStats.currUsedMem += pUsed->mBlockSize;
 	this->pHeap->mStats.currNumUsedBlocks += 1;
 	if (this->pHeap->mStats.peakUsedMemory < this->pHeap->mStats.currUsedMem) {
@@ -236,31 +252,30 @@ void* Mem::getBlockPtr(const Used* pUsed) const
 	assert(pUsed != nullptr);
 	void *p = (void *)(pUsed + 1);
 	return p;
-
 }
 
 void Mem::free(void * const data)
 {
-	if (data != nullptr)
-	{
-		// First, backtrack to the position of the Used Header
-		Used *pUsed = (Used *)((int *)data - sizeof(this->pHeap->pUsedHead));
+	assert(data != nullptr);
+	// First, backtrack to the position of the Used Header
+	Used *pUsed = (Used *)((uint32_t *)data - sizeof(this->pHeap->pUsedHead));
 
-		// Remove used block from used list
-		this->removeUsedBlock(pUsed);
+	bool aboveBlockFree = pUsed->mAboveBlockFree;
+	
+	// Remove used block from used list
+	this->removeUsedBlock(pUsed);
 
-		// Convert used block to a free block
-		Free *pFree = placement_new(pUsed, Free, pUsed->mBlockSize);
+	// Convert used block to a free block
+	Free *pFree = placement_new(pUsed, Free, pUsed->mBlockSize);
 
-		// Update requisite stats
-		this->removeUsedAdjustStats(pUsed);
+	// Update requisite stats
+	this->removeUsedAdjustStats(pUsed);
 
-		// Add free block back to the free list
-		pFree = this->addFreeBlock(pFree);
+	// Add free block back to the free list
+	pFree = this->addFreeBlock(pFree, aboveBlockFree);
 
-		this->setFreeAboveFlag(pUsed);
-		this->addSecretPtr(pFree);
-	}
+	this->setFreeAboveFlag(pUsed);
+	this->addSecretPtr(pFree);
 }
 
 void Mem::removeUsedBlock(const Used *pUsed) const
@@ -285,12 +300,10 @@ void Mem::removeUsedBlock(const Used *pUsed) const
 		pUsed->pUsedPrev->pUsedNext = nullptr;
 	}
 	else {
-		Used* pUsedTmp = pUsed->pUsedNext;
 		pUsed->pUsedNext->pUsedPrev = pUsed->pUsedPrev;
-		pUsed->pUsedPrev->pUsedNext = pUsedTmp;
+		pUsed->pUsedPrev->pUsedNext = pUsed->pUsedNext;
 	}
 }
-
 
 void Mem::removeUsedAdjustStats(const Used *pUsed) const
 // This method updates the relevant stats for a newly deallocated used block.
@@ -302,7 +315,7 @@ void Mem::removeUsedAdjustStats(const Used *pUsed) const
 	this->pHeap->mStats.currNumFreeBlocks++;
 }
 
-Free* Mem::addFreeBlock(Free *pFree)
+Free* Mem::addFreeBlock(Free *pFree, bool aboveBlockFree)
 // This method is used to add a newly deallocated Free block back onto the free list.
 // The relevant pointers are updated.
 {
@@ -319,19 +332,19 @@ Free* Mem::addFreeBlock(Free *pFree)
 	{
 		// Coalesce
 		// Caluculate next free block
-		unsigned int diff = (pFree->mBlockSize + this->getFreeHeaderSize(pFree));
+		uint32_t diff = (pFree->mBlockSize + this->getFreeHeaderSize(pFree));
 		Free *nextFreeBlock = (Free *)((char *)pFree + diff);
 
 		// Calculate previous free block
 		uint32_t *prevFreeBlock = (uint32_t *)((char *)pFree - (char*)4);
 		Free * prevFreeHdr = (Free *)*prevFreeBlock;
 
-		if (nextFreeBlock->mType == Block::Free || ((uint32_t *)prevFreeHdr > (uint32_t *)this->pHeap && (uint32_t)prevFreeHdr < 0xcdcdcdcd && prevFreeHdr->mType == Block::Free)) {
+		if (nextFreeBlock->mType == Block::Free || aboveBlockFree == true) {
 			if (nextFreeBlock->mType == Block::Free)
 			{
 				pFree = this->mergeBlocks(nextFreeBlock, pFree);
 			}
-			if ((uint32_t *)prevFreeHdr > (uint32_t *)this->pHeap && (uint32_t)prevFreeHdr < 0xcdcdcdcd && prevFreeHdr->mType == Block::Free) {
+			if (aboveBlockFree == true) {
 				pFree = this->mergeBlocks(prevFreeHdr, pFree);
 			}
 		}
@@ -418,7 +431,7 @@ Free* Mem::mergeBlocks(Free* pHead, Free* pNew) const
 		this->pHeap->pFreeHead = pFree;
 	}
 
-	// Update Next fit pointer
+	// Update Next fit pointer if we merged to the next fit block
 	if (this->pHeap->pNextFit == pNew || this->pHeap->pNextFit == pHead) {
 		this->pHeap->pNextFit = pFree;
 	}
@@ -436,28 +449,19 @@ uint32_t Mem::getFreeHeaderSize(const Free* pFree) const {
 }
 
 void Mem::addSecretPtr(const Free* pFree) {
-	uint32_t headerSize = this->getFreeHeaderSize(pFree);
-	uint32_t blockSize = pFree->mBlockSize;
-	uint32_t* endBlock = (uint32_t *)((char *)pFree + blockSize + headerSize - (char *)4);
-	uint32_t secretHdr = (uint32_t)((char *)pFree);
-	*endBlock = secretHdr;
+	uint32_t blockSize = pFree->mBlockSize + this->getFreeHeaderSize(pFree);
+	uint32_t* endBlock = (uint32_t *)((char *)pFree + blockSize - (char *)4);
+	*endBlock = (uint32_t)pFree;
 }
-
 
 void Mem::setFreeAboveFlag(Used* hdr)
 {
 	uint32_t headerSize = this->getFreeHeaderSize((Free *)hdr);
-	Used *nextPtr = (Used *)((char *)hdr + hdr->mBlockSize +  headerSize);
+	Used *nextPtr = (Used *)((char *)hdr + hdr->mBlockSize + headerSize);
 
-	if (nextPtr != 0) {
-		if (nextPtr->mType == Block::Used) 
-		{
-			nextPtr->mAboveBlockFree = true;
-		}
-		else if (nextPtr->mType == Block::Free) 
-		{
-			nextPtr->mAboveBlockFree = false;
-		}
+	if (nextPtr != nullptr && nextPtr->mType == Block::Used) 
+	{
+		nextPtr->mAboveBlockFree = true;
 	}
 }
 // ---  End of File ---------------
