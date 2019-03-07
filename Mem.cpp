@@ -386,9 +386,6 @@ Free* Mem::dontMergeFreeBlock(Free* pFree)
 Free* Mem::mergeBlocks(Free* pHead, Free* pNew) const
 // This method serves as our coalesce function. It takes two pointers to free blocks
 // and merges them into a single free block
-// ***Further work is needed, this method is only operable if we are merging a
-// block with another block pointed to by the free header. What about merges
-// on two blocks further along in the free list?***
 {
 	// Calculate new total block size
 	uint32_t headerSize = this->getFreeHeaderSize(pNew);
